@@ -5,9 +5,7 @@ import (
 	"io"
 	"net"
 	"strconv"
-	"time"
 
-	"github.com/lucas-clemente/quic-go"
 	"github.com/pkg/errors"
 )
 
@@ -28,11 +26,15 @@ const (
 	fqdnSize = 1
 	portSize = 2
 	respSize = 1
+)
 
+const (
 	typeIPv4 uint8 = iota
 	typeIPv6
 	typeFQDN
+)
 
+const (
 	respOK uint8 = iota
 	respInvalidPWD
 	respInvalidHost
@@ -133,18 +135,4 @@ func (r Response) Error() string {
 	default:
 		return "unknown error"
 	}
-}
-
-type timeoutStream struct {
-	quic.Stream
-}
-
-func (t *timeoutStream) Read(p []byte) (n int, err error) {
-	_ = t.Stream.SetReadDeadline(time.Now().Add(time.Minute))
-	return t.Stream.Read(p)
-}
-
-func (t *timeoutStream) Write(p []byte) (n int, err error) {
-	_ = t.Stream.SetWriteDeadline(time.Now().Add(time.Minute))
-	return t.Stream.Write(p)
 }
