@@ -2,8 +2,12 @@ package socks
 
 import (
 	"encoding/binary"
+	"io"
 	"net"
+	"strconv"
+	"time"
 
+	"github.com/lucas-clemente/quic-go"
 	"github.com/pkg/errors"
 )
 
@@ -23,14 +27,16 @@ const (
 	typeSize = 1
 	fqdnSize = 1
 	portSize = 2
+	respSize = 1
 
-	typeIPv4 uint8 = 0x00
-	typeIPv6 uint8 = 0x01
-	typeFQDN uint8 = 0x02
+	typeIPv4 uint8 = iota
+	typeIPv6
+	typeFQDN
 
-	respOK            uint8 = 0x00
-	respInvalidPWD    uint8 = 0x01
-	respConnectFailed uint8 = 0x02
+	respOK uint8 = iota
+	respInvalidPWD
+	respInvalidHost
+	respConnectFailed
 )
 
 // type + host + port
@@ -70,6 +76,52 @@ func packHostData(host string, port uint16) ([]byte, error) {
 	return append(hostData, portData...), nil
 }
 
+func unpackHostData(u io.Reader) (string, error) {
+	typ := make([]byte, typeSize)
+	_, err := u.Read(typ)
+	if err != nil {
+		return "", err
+	}
+	var host string
+	switch typ[0] {
+	case typeIPv4:
+		ip := make([]byte, net.IPv4len)
+		_, err = io.ReadFull(u, ip)
+		if err != nil {
+			return "", err
+		}
+		host = net.IP(ip).String()
+	case typeIPv6:
+		ip := make([]byte, net.IPv6len)
+		_, err = io.ReadFull(u, ip)
+		if err != nil {
+			return "", err
+		}
+		host = "[" + net.IP(ip).String() + "]"
+	case typeFQDN:
+		fqdnLen := make([]byte, fqdnSize)
+		_, err = u.Read(fqdnLen)
+		if err != nil {
+			return "", err
+		}
+		fqdn := make([]byte, int(fqdnLen[0]))
+		_, err = io.ReadFull(u, fqdn)
+		if err != nil {
+			return "", err
+		}
+		host = string(fqdn)
+	default:
+		return "", errors.New("invalid type")
+	}
+	port := make([]byte, portSize)
+	_, err = io.ReadFull(u, port)
+	if err != nil {
+		return "", err
+	}
+	portStr := strconv.Itoa(int(binary.BigEndian.Uint16(port)))
+	return host + ":" + portStr, nil
+}
+
 type Response uint8
 
 func (r Response) Error() string {
@@ -81,4 +133,18 @@ func (r Response) Error() string {
 	default:
 		return "unknown error"
 	}
+}
+
+type timeoutStream struct {
+	quic.Stream
+}
+
+func (t *timeoutStream) Read(p []byte) (n int, err error) {
+	_ = t.Stream.SetReadDeadline(time.Now().Add(time.Minute))
+	return t.Stream.Read(p)
+}
+
+func (t *timeoutStream) Write(p []byte) (n int, err error) {
+	_ = t.Stream.SetWriteDeadline(time.Now().Add(time.Minute))
+	return t.Stream.Write(p)
 }
