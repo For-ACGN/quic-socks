@@ -22,6 +22,7 @@ func main() {
 	flag.StringVar(&certPath, "c", "cert.pem", "tls certificate file path")
 	flag.StringVar(&keyPath, "k", "key.pem", "tls key file path")
 	flag.Parse()
+
 	// set certificate
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
