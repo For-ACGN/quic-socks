@@ -52,28 +52,31 @@ func (c *Client) Connect(host string, port uint16) (net.Conn, error) {
 			return nil, err
 		}
 	}
+	str := &timeoutStream{Stream: stream}
 	hostData, err := packHostData(host, port)
 	if err != nil {
+		_ = stream.Close()
 		return nil, err
 	}
-	conn := newConn(c.session, stream)
-
 	// send request
-	_, err = conn.Write(append(c.password, hostData...))
+	_, err = str.Write(append(c.password, hostData...))
 	if err != nil {
+		_ = stream.Close()
 		return nil, err
 	}
 
 	// receive response
-	resp := make([]byte, 1)
-	_, err = conn.Read(resp)
+	resp := make([]byte, respSize)
+	_, err = str.Read(resp)
 	if err != nil {
+		_ = stream.Close()
 		return nil, err
 	}
 	if resp[0] != respOK {
+		_ = stream.Close()
 		return nil, Response(resp[0])
 	}
-	return conn, nil
+	return newConn(c.session, stream), nil
 }
 
 func (c *Client) Close() {
