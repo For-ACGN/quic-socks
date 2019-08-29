@@ -41,16 +41,24 @@ func (c *Client) dial() error {
 
 // Connect
 func (c *Client) Connect(host string, port uint16) (net.Conn, error) {
-	stream, err := c.session.OpenStreamSync(context.Background())
-	if err != nil {
-		if ne, ok := err.(net.Error); ok && ne.Timeout() {
-			// reconnect
-			err = c.dial()
-			if err != nil {
+	var (
+		stream quic.Stream
+		err    error
+	)
+	for i := 0; i < 3; i++ {
+		stream, err = c.session.OpenStreamSync(context.Background())
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				// reconnect
+				err = c.dial()
+				if err != nil {
+					return nil, err
+				}
+			} else {
 				return nil, err
 			}
 		} else {
-			return nil, err
+			break
 		}
 	}
 	str := &deadlineStream{Stream: stream}
