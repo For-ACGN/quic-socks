@@ -18,6 +18,7 @@ type Server struct {
 }
 
 func NewServer(address string, tlsConfig *tls.Config, password string) (*Server, error) {
+	tlsConfig.NextProtos = append(tlsConfig.NextProtos, "h2")
 	listener, err := quic.ListenAddr(address, tlsConfig, nil)
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -33,11 +34,11 @@ func NewServer(address string, tlsConfig *tls.Config, password string) (*Server,
 	}, nil
 }
 
-func (s *Server) ListenAndServe() {
+func (s *Server) ListenAndServe() error {
 	for {
 		session, err := s.listener.Accept(context.Background())
 		if err != nil {
-			return
+			return err
 		}
 		go s.handleSession(session)
 	}
@@ -55,15 +56,19 @@ func (s *Server) handleSession(session quic.Session) {
 }
 
 func (s *Server) handleStream(stream quic.Stream) {
-	defer func() { _ = stream.Close() }()
-	str := &timeoutStream{Stream: stream}
+	defer func() {
+		recover()
+		_ = stream.Close()
+	}()
+	str := &deadlineStream{Stream: stream}
 	// read password
 	pwd := make([]byte, s.pwdLen)
 	_, err := io.ReadFull(str, pwd)
 	if err != nil {
 		return
 	}
-	if bytes.Equal(pwd, s.password) {
+
+	if !bytes.Equal(pwd, s.password) {
 		// invalid password
 		_, _ = str.Write([]byte{respInvalidPWD})
 		return
@@ -82,11 +87,12 @@ func (s *Server) handleStream(stream quic.Stream) {
 		_, _ = str.Write([]byte{respConnectFailed})
 		return
 	}
+	defer func() { _ = conn.Close() }()
 	_, _ = str.Write([]byte{respOK})
 
 	// copy
-	_, _ = io.Copy(conn, stream)
 	go func() { _, _ = io.Copy(stream, conn) }()
+	_, _ = io.Copy(conn, stream)
 }
 
 func (s *Server) Close() {

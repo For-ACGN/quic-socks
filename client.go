@@ -25,6 +25,7 @@ func NewClient(address string, tlsConfig *tls.Config, password string) (*Client,
 	if len(c.password) > 32 {
 		return nil, errors.New("password size > 32")
 	}
+	tlsConfig.NextProtos = append(tlsConfig.NextProtos, "h2")
 	err := c.dial()
 	if err != nil {
 		return nil, err
@@ -52,7 +53,7 @@ func (c *Client) Connect(host string, port uint16) (net.Conn, error) {
 			return nil, err
 		}
 	}
-	str := &timeoutStream{Stream: stream}
+	str := &deadlineStream{Stream: stream}
 	hostData, err := packHostData(host, port)
 	if err != nil {
 		_ = stream.Close()
