@@ -2,10 +2,10 @@ package socks
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"io"
 	"net"
+	"os"
 
 	"github.com/lucas-clemente/quic-go"
 	"github.com/pkg/errors"
@@ -18,6 +18,10 @@ type Server struct {
 }
 
 func NewServer(address string, tlsConfig *tls.Config, password string) (*Server, error) {
+	err := os.Setenv("GODEBUG", "bbr=1")
+	if err != nil {
+		return nil, err
+	}
 	tlsConfig.NextProtos = append(tlsConfig.NextProtos, "h2")
 	listener, err := quic.ListenAddr(address, tlsConfig, nil)
 	if err != nil {
@@ -36,7 +40,7 @@ func NewServer(address string, tlsConfig *tls.Config, password string) (*Server,
 
 func (s *Server) ListenAndServe() error {
 	for {
-		session, err := s.listener.Accept(context.Background())
+		session, err := s.listener.Accept()
 		if err != nil {
 			return err
 		}
@@ -47,7 +51,7 @@ func (s *Server) ListenAndServe() error {
 func (s *Server) handleSession(session quic.Session) {
 	defer func() { _ = session.Close() }()
 	for {
-		stream, err := session.AcceptStream(context.Background())
+		stream, err := session.AcceptStream()
 		if err != nil {
 			return
 		}
