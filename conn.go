@@ -28,5 +28,7 @@ func (c *conn) RemoteAddr() net.Addr {
 }
 
 func (c *conn) Close() error {
-	return c.Stream.Close()
+	_ = c.session.Close()
+	_ = c.Stream.Close()
+	return nil
 }
