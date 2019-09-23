@@ -2,7 +2,6 @@ package socks
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"io"
 	"net"
@@ -41,7 +40,7 @@ func NewServer(address string, tlsConfig *tls.Config, password string) (*Server,
 
 func (s *Server) ListenAndServe() error {
 	for {
-		session, err := s.listener.Accept(context.Background())
+		session, err := s.listener.Accept()
 		if err != nil {
 			return err
 		}
@@ -52,7 +51,7 @@ func (s *Server) ListenAndServe() error {
 func (s *Server) handleSession(session quic.Session) {
 	defer func() { _ = session.Close() }()
 	for {
-		stream, err := session.AcceptStream(context.Background())
+		stream, err := session.AcceptStream()
 		if err != nil {
 			return
 		}

@@ -1,7 +1,6 @@
 package socks
 
 import (
-	"context"
 	"crypto/tls"
 	"net"
 	"os"
@@ -72,7 +71,7 @@ func (c *Client) Connect(host string, port uint16) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	stream, err := session.OpenStreamSync(context.Background())
+	stream, err := session.OpenStreamSync()
 	if err != nil {
 		return nil, err
 	}
