@@ -9,6 +9,8 @@ import (
 	"github.com/pkg/errors"
 )
 
+const nextProto = "h3-23"
+
 // client connect
 // type can be 0x00(IPv4), 0x01(IPv6), 0x02(FQDN)
 //
@@ -29,13 +31,13 @@ const (
 )
 
 const (
-	typeIPv4 uint8 = iota
+	typeIPv4 uint8 = iota + 1
 	typeIPv6
 	typeFQDN
 )
 
 const (
-	respOK uint8 = iota
+	respOK uint8 = iota + 1
 	respInvalidPWD
 	respInvalidHost
 	respConnectFailed
@@ -99,7 +101,7 @@ func unpackHostData(u io.Reader) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		host = "[" + net.IP(ip).String() + "]"
+		host = net.IP(ip).String()
 	case typeFQDN:
 		fqdnLen := make([]byte, fqdnSize)
 		_, err = u.Read(fqdnLen)
@@ -121,7 +123,7 @@ func unpackHostData(u io.Reader) (string, error) {
 		return "", err
 	}
 	portStr := strconv.Itoa(int(binary.BigEndian.Uint16(port)))
-	return host + ":" + portStr, nil
+	return net.JoinHostPort(host, portStr), nil
 }
 
 type Response uint8
@@ -131,7 +133,7 @@ func (r Response) Error() string {
 	case respInvalidPWD:
 		return "invalid password"
 	case respConnectFailed:
-		return "connect target failed"
+		return "failed to connect target"
 	default:
 		return "unknown error"
 	}
