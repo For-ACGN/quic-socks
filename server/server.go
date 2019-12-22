@@ -3,6 +3,8 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
@@ -17,7 +19,7 @@ func main() {
 		certPath  string
 		keyPath   string
 	)
-	flag.StringVar(&localAddr, "l", ":443", "local bind address")
+	flag.StringVar(&localAddr, "l", ":1523", "bind address")
 	flag.StringVar(&password, "p", "123456", "password")
 	flag.StringVar(&certPath, "c", "cert.pem", "tls certificate file path")
 	flag.StringVar(&keyPath, "k", "key.pem", "tls key file path")
@@ -26,13 +28,16 @@ func main() {
 	// set certificate
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Print(err)
+		return
 	}
 	tlsConfig := tls.Config{Certificates: []tls.Certificate{cert}}
-	server, err := socks.NewServer(localAddr, &tlsConfig, password)
+	server, err := socks.NewServer(localAddr, []byte(password), &tlsConfig)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Print(err)
+		return
 	}
+	log.SetOutput(ioutil.Discard)
 
 	// handle signal
 	go func() {
@@ -44,6 +49,6 @@ func main() {
 
 	err = server.ListenAndServe()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Print(err)
 	}
 }

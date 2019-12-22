@@ -7,6 +7,7 @@ quic-socks implements socks5 server using custom protocol in the back end, due t
 * due to use of QUIC(UDP), implements BBR in user state
 * the experience is still good in the case of weak networks
 * the experience will not deteriorate in the case of mobile networks
+* using pre-connection to reduce RTT between client and server
 
 ## Protocol
 password + type + host + port\

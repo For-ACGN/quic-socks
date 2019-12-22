@@ -1,39 +1,37 @@
 package socks
 
 import (
-	"bytes"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"io"
 	"net"
 	"os"
+	"time"
 
 	"github.com/lucas-clemente/quic-go"
 	"github.com/pkg/errors"
 )
 
 type Server struct {
-	password []byte
-	pwdLen   int
+	hash     []byte // password hash
 	listener quic.Listener
 }
 
-func NewServer(address string, tlsConfig *tls.Config, password string) (*Server, error) {
+func NewServer(address string, password []byte, tlsConfig *tls.Config) (*Server, error) {
+	// skip QUIC debug log about BBR
 	err := os.Setenv("GODEBUG", "bbr=1")
 	if err != nil {
 		return nil, err
 	}
-	tlsConfig.NextProtos = append(tlsConfig.NextProtos, "h2")
+	tlsConfig.NextProtos = append(tlsConfig.NextProtos, nextProto)
 	listener, err := quic.ListenAddr(address, tlsConfig, nil)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	l := len(password)
-	if l > 32 {
-		return nil, errors.New("password size > 32")
-	}
+	hash := sha256.Sum256(password)
 	return &Server{
-		password: []byte(password),
-		pwdLen:   l,
+		hash:     hash[:],
 		listener: listener,
 	}, nil
 }
@@ -49,54 +47,45 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) handleSession(session quic.Session) {
-	defer func() { _ = session.Close() }()
-	for {
-		stream, err := session.AcceptStream()
-		if err != nil {
-			return
-		}
-		go s.handleStream(stream)
-	}
-}
-
-func (s *Server) handleStream(stream quic.Stream) {
-	defer func() {
-		recover()
-		_ = stream.Close()
-	}()
-	str := &deadlineStream{Stream: stream}
-	// read password
-	pwd := make([]byte, s.pwdLen)
-	_, err := io.ReadFull(str, pwd)
+	defer func() { recover() }()
+	var err error
+	conn, err := newConn(session)
 	if err != nil {
-		return
-	}
-
-	if !bytes.Equal(pwd, s.password) {
-		// invalid password
-		_, _ = str.Write([]byte{respInvalidPWD})
-		return
-	}
-
-	// get connect host
-	address, err := unpackHostData(str)
-	if err != nil {
-		_, _ = str.Write([]byte{respInvalidHost})
-		return
-	}
-
-	// connect
-	conn, err := net.Dial("tcp", address)
-	if err != nil {
-		_, _ = str.Write([]byte{respConnectFailed})
+		_ = session.Close()
 		return
 	}
 	defer func() { _ = conn.Close() }()
-	_, _ = str.Write([]byte{respOK})
+	_ = conn.SetDeadline(time.Now().Add(time.Minute))
+	// read password hash
+	hash := make([]byte, sha256.Size)
+	_, err = io.ReadFull(conn, hash)
+	if err != nil {
+		return
+	}
+	if subtle.ConstantTimeCompare(hash, s.hash) != 1 {
+		return
+	}
+	// get connect host
+	host, err := unpackHostData(conn)
+	if err != nil {
+		_, _ = conn.Write([]byte{respInvalidHost})
+		return
+	}
+	remote, err := net.Dial("tcp", host)
+	if err != nil {
+		_, _ = conn.Write([]byte{respConnectFailed})
+		return
+	}
+	defer func() { _ = remote.Close() }()
+	_, _ = conn.Write([]byte{respOK})
 
 	// copy
-	go func() { _, _ = io.Copy(stream, conn) }()
-	_, _ = io.Copy(conn, stream)
+	_ = conn.SetDeadline(time.Time{})
+	go func() {
+		defer func() { recover() }()
+		_, _ = io.Copy(conn, remote)
+	}()
+	_, _ = io.Copy(remote, conn)
 }
 
 func (s *Server) Close() {

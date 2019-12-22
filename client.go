@@ -1,107 +1,80 @@
 package socks
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"io"
 	"net"
 	"os"
+	"time"
 
 	"github.com/lucas-clemente/quic-go"
-	"github.com/pkg/errors"
 )
 
 type Client struct {
 	address   string
-	password  []byte
+	hash      []byte
 	tlsConfig *tls.Config
 	session   quic.Session // wait quic-go support BBR
 }
 
-func NewClient(address string, tlsConfig *tls.Config, password string) (*Client, error) {
+func NewClient(address string, password []byte, tlsConfig *tls.Config) (*Client, error) {
+	// skip QUIC debug log about BBR
 	err := os.Setenv("GODEBUG", "bbr=1")
 	if err != nil {
 		return nil, err
 	}
-	c := Client{
+	hash := sha256.Sum256(password)
+	client := Client{
 		address:   address,
-		password:  []byte(password),
+		hash:      hash[:],
 		tlsConfig: tlsConfig,
 	}
-	if len(c.password) > 32 {
-		return nil, errors.New("password size > 32")
-	}
-	tlsConfig.NextProtos = append(tlsConfig.NextProtos, "h2")
-	/*
-		err = c.dial()
-		if err != nil {
-			return nil, err
-		}
-	*/
-	return &c, nil
+	tlsConfig.NextProtos = append(tlsConfig.NextProtos, nextProto)
+	return &client, nil
 }
 
-func (c *Client) dial() error {
-	var err error
-	cfg := quic.Config{MaxIncomingStreams: 4096}
-	c.session, err = quic.DialAddr(c.address, c.tlsConfig, &cfg)
-	return err
-}
-
-// Connect
-func (c *Client) Connect(host string, port uint16) (net.Conn, error) {
-	// wait quic-go support BBR
-	/*
-		var (
-			stream quic.Stream
-			err    error
-		)
-		for i := 0; i < 3; i++ {
-			stream, err = c.session.OpenStream()
-			if err != nil {
-				// reconnect
-				err = c.dial()
-				if err != nil {
-					return nil, err
-				}
-			} else {
-				break
-			}
-		}
-	*/
+func (c *Client) Dial() (net.Conn, error) {
 	session, err := quic.DialAddr(c.address, c.tlsConfig, nil)
 	if err != nil {
 		return nil, err
 	}
-	stream, err := session.OpenStreamSync()
+	conn, err := newConn(session)
 	if err != nil {
+		_ = session.Close()
 		return nil, err
 	}
-	str := &deadlineStream{Stream: stream}
+	_ = conn.SetDeadline(time.Now().Add(time.Minute))
+	_, err = conn.Write(c.hash)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func Connect(conn net.Conn, host string, port uint16) (net.Conn, error) {
 	hostData, err := packHostData(host, port)
 	if err != nil {
-		_ = stream.Close()
 		return nil, err
 	}
 	// send request
-	_, err = str.Write(append(c.password, hostData...))
+	_, err = conn.Write(hostData)
 	if err != nil {
-		_ = stream.Close()
+		_ = conn.Close()
 		return nil, err
 	}
-
 	// receive response
 	resp := make([]byte, respSize)
-	_, err = str.Read(resp)
+	_, err = io.ReadFull(conn, resp)
 	if err != nil {
-		_ = stream.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 	if resp[0] != respOK {
-		_ = stream.Close()
+		_ = conn.Close()
 		return nil, Response(resp[0])
 	}
-	return newConn(session, stream), nil
-}
-
-func (c *Client) Close() {
-	// _ = c.session.Close()
+	_ = conn.SetDeadline(time.Time{})
+	return conn, nil
 }

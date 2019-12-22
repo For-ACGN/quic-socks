@@ -6,12 +6,15 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"flag"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/For-ACGN/quic-socks"
@@ -23,57 +26,97 @@ func main() {
 		remoteAddr string
 		password   string
 		certPath   string
+		preConns   int
 	)
-	flag.StringVar(&localAddr, "l", "127.0.0.1:1080", "local bind address")
-	flag.StringVar(&remoteAddr, "r", "127.0.0.1:443", "server bind address")
+	flag.StringVar(&localAddr, "l", "localhost:1080", "local bind address")
+	flag.StringVar(&remoteAddr, "r", "localhost:1523", "server bind address")
 	flag.StringVar(&password, "p", "123456", "password")
 	flag.StringVar(&certPath, "c", "cert.pem", "tls certificate file path")
+	flag.IntVar(&preConns, "pre", 128, "the number of the pre-connected connection")
 	flag.Parse()
 
 	// set certificate
 	certData, err := ioutil.ReadFile(certPath)
 	if err != nil {
-		log.Fatalln("load certificate failed:", err)
+		fmt.Println(err)
+		return
 	}
 	block, _ := pem.Decode(certData)
 	if block == nil {
-		log.Fatal("invalid PEM block")
+		fmt.Println("invalid PEM block")
+		return
 	}
 	if block.Type != "CERTIFICATE" {
-		log.Fatal("invalid PEM block")
+		fmt.Println("invalid PEM block type")
+		return
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		log.Fatalln("load tls certificate faild:", err)
+		fmt.Println(err)
+		return
 	}
 	tlsConfig := tls.Config{RootCAs: x509.NewCertPool()}
 	tlsConfig.RootCAs.AddCert(cert)
 
 	// connect quic-socks server
-	client, err := socks.NewClient(remoteAddr, &tlsConfig, password)
+	client, err := socks.NewClient(remoteAddr, []byte(password), &tlsConfig)
 	if err != nil {
-		log.Fatalln("connect quic-socks server failed:", err)
+		fmt.Println(err)
+		return
 	}
-	defer client.Close()
 
 	// accept client conn
 	listener, err := net.Listen("tcp", localAddr)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println(err)
+		return
+	}
+
+	log.SetOutput(ioutil.Discard)
+
+	wg := sync.WaitGroup{}
+	// start pre-connected worker
+	stopSignal := make(chan struct{})
+	connQueue := make(chan net.Conn, preConns)
+	for i := 0; i < preConns/10+1; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stopSignal:
+					return
+				default:
+				}
+				conn, err := client.Dial()
+				if err != nil {
+					fmt.Println("failed to dial quic socks:", err)
+					time.Sleep(time.Second)
+					continue
+				}
+				select {
+				case connQueue <- conn:
+				case <-stopSignal:
+					return
+				}
+			}
+		}()
 	}
 
 	// handle signal
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		signalChan := make(chan os.Signal, 1)
 		signal.Notify(signalChan, os.Kill, os.Interrupt)
 		<-signalChan
+		close(stopSignal)
 		_ = listener.Close()
-		client.Close()
 	}()
 
 	// handle conn
 	var tempDelay time.Duration
-	max := 1 * time.Second
+	max := time.Second
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -86,15 +129,16 @@ func main() {
 				if tempDelay > max {
 					tempDelay = max
 				}
-				log.Printf("accept error: %v; retrying in %v\n", err, tempDelay)
+				fmt.Printf("accept error: %v; retrying in %v\n", err, tempDelay)
 				time.Sleep(tempDelay)
 				continue
 			}
-			log.Fatal(err)
+			break
 		}
 		tempDelay = 0
-		go handleConn(client, conn)
+		go handleConn(connQueue, conn)
 	}
+	wg.Wait()
 }
 
 const (
@@ -118,75 +162,60 @@ var (
 	connRefuse = []byte{version5, connRefused, reserve, ipv4, 0, 0, 0, 0, 0, 0}
 )
 
-type deadlineConn struct {
-	net.Conn
-}
-
-func (d *deadlineConn) Read(p []byte) (n int, err error) {
-	_ = d.Conn.SetReadDeadline(time.Now().Add(time.Minute))
-	return d.Conn.Read(p)
-}
-
-func (d *deadlineConn) Write(p []byte) (n int, err error) {
-	_ = d.Conn.SetWriteDeadline(time.Now().Add(time.Minute))
-	return d.Conn.Write(p)
-}
-
 // simple socks5 server, handle socks5 client
-func handleConn(client *socks.Client, conn net.Conn) {
+func handleConn(queue chan net.Conn, conn net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Println("panic:", r)
+			fmt.Println("panic:", r)
 		}
 		_ = conn.Close()
 	}()
-
-	dConn := &deadlineConn{Conn: conn}
+	_ = conn.SetDeadline(time.Now().Add(time.Minute))
 
 	// read version & authentication methods number
 	buffer := make([]byte, 16)
-	_, err := io.ReadFull(dConn, buffer[:2])
+	_, err := io.ReadFull(conn, buffer[:2])
 	if err != nil {
-		log.Println("read socks5 version failed:", err)
+		fmt.Println("read socks5 version failed:", err)
 		return
 	}
 	if buffer[0] != version5 {
-		log.Printf("unexpected protocol version %d\n", buffer[0])
+		fmt.Printf("unexpected protocol version %d\n", buffer[0])
 		return
 	}
 	authNum := int64(buffer[1])
 	if authNum == 0 {
-		log.Println("authentication methods number is 0")
+		fmt.Println("authentication methods number is 0")
 		return
 	}
 
 	// read authentication methods(discard)
-	_, err = io.Copy(ioutil.Discard, io.LimitReader(dConn, authNum))
+	_, err = io.Copy(ioutil.Discard, io.LimitReader(conn, authNum))
 	if err != nil {
-		log.Println("read authentication methods failed:", err)
+		fmt.Println("read authentication methods failed:", err)
 		return
 	}
 
 	// write not require
-	_, err = dConn.Write([]byte{version5, notRequired})
+	_, err = conn.Write([]byte{version5, notRequired})
 	if err != nil {
-		log.Println("write not require failed:", err)
+		fmt.Println("write not require failed:", err)
 		return
 	}
 
 	// receive connect target
 	// version | cmd | reserve | address type
-	_, err = io.ReadAtLeast(dConn, buffer[:4], 4)
+	_, err = io.ReadAtLeast(conn, buffer[:4], 4)
 	if err != nil {
-		log.Println("receive connect target failed:", err)
+		fmt.Println("receive connect target failed:", err)
 		return
 	}
 	if buffer[0] != version5 {
-		log.Printf("unexpected protocol version %d\n", buffer[0])
+		fmt.Printf("unexpected protocol version %d\n", buffer[0])
 		return
 	}
 	if buffer[1] != connect {
-		log.Printf("unsupport cmd %d\n", buffer[1])
+		fmt.Printf("unsupport cmd %d\n", buffer[1])
 		return
 	}
 	// buffer[2] is reserve
@@ -195,66 +224,84 @@ func handleConn(client *socks.Client, conn net.Conn) {
 	var host string
 	switch buffer[3] {
 	case ipv4:
-		_, err = io.ReadAtLeast(dConn, buffer[:net.IPv4len], net.IPv4len)
+		_, err = io.ReadAtLeast(conn, buffer[:net.IPv4len], net.IPv4len)
 		if err != nil {
-			log.Println("read IPv4 failed:", err)
+			fmt.Println("read IPv4 failed:", err)
 			return
 		}
 		host = net.IP(buffer[:4]).String()
 	case ipv6:
-		_, err = io.ReadAtLeast(dConn, buffer[:net.IPv6len], net.IPv6len)
+		_, err = io.ReadAtLeast(conn, buffer[:net.IPv6len], net.IPv6len)
 		if err != nil {
-			log.Println("read IPv6 failed:", err)
+			fmt.Println("read IPv6 failed:", err)
 			return
 		}
 		host = "[" + net.IP(buffer[:net.IPv6len]).String() + "]"
 	case fqdn:
 		// get FQDN length
-		_, err = io.ReadAtLeast(dConn, buffer[:1], 1)
+		_, err = io.ReadAtLeast(conn, buffer[:1], 1)
 		if err != nil {
-			log.Println("read FQDN length failed:", err)
+			fmt.Println("read FQDN length failed:", err)
 			return
 		}
 		l := int(buffer[0])
 		if l > len(buffer) {
 			buffer = make([]byte, l)
 		}
-		_, err = io.ReadAtLeast(dConn, buffer[:l], l)
+		_, err = io.ReadAtLeast(conn, buffer[:l], l)
 		if err != nil {
-			log.Println("read FQDN failed:", err)
+			fmt.Println("read FQDN failed:", err)
 			return
 		}
 		host = string(buffer[:l])
 	default:
-		log.Printf("address type not supported %d\n", buffer[0])
+		fmt.Printf("address type not supported %d\n", buffer[0])
 		return
 	}
 
 	// read port
-	_, err = io.ReadAtLeast(dConn, buffer[:2], 2)
+	_, err = io.ReadAtLeast(conn, buffer[:2], 2)
 	if err != nil {
-		log.Println("read port failed:", err)
+		fmt.Println("read port failed:", err)
 		return
 	}
 
 	// start connect to quic-socks server
 	port := binary.BigEndian.Uint16(buffer[:2])
-	socksConn, err := client.Connect(host, port)
-	if err != nil {
-		log.Println("quic-socks:", err)
-		_, _ = dConn.Write(connRefuse)
-		return
+	var remote net.Conn
+startCopy:
+	for {
+		select {
+		case preConn := <-queue:
+			remote, err = socks.Connect(preConn, host, port)
+			if err != nil {
+				_ = preConn.Close()
+				errStr := err.Error()
+				if strings.Contains(errStr, "invalid password") ||
+					strings.Contains(errStr, "failed to connect target") {
+					_, _ = conn.Write(connRefuse)
+					fmt.Println(errStr)
+					return
+				}
+				continue
+			}
+			break startCopy
+		case <-time.After(30 * time.Second):
+			fmt.Println("get pre-connection timeout")
+			return
+		}
 	}
-	defer func() { _ = socksConn.Close() }()
-
+	defer func() { _ = remote.Close() }()
 	// write reply
 	// padding ipv4 + 0.0.0.0 + 0(port)
-	_, err = dConn.Write(success)
+	_, err = conn.Write(success)
 	if err != nil {
-		log.Println("write reply failed:", err)
+		fmt.Println("failed to write reply:", err)
 		return
 	}
 	// copy
-	go func() { _, _ = io.Copy(conn, socksConn) }()
-	_, _ = io.Copy(socksConn, conn)
+	_ = conn.SetDeadline(time.Time{})
+	_ = remote.SetDeadline(time.Time{})
+	go func() { _, _ = io.Copy(conn, remote) }()
+	_, _ = io.Copy(remote, conn)
 }

@@ -12,3 +12,6 @@
 *.out
 
 .idea
+
+client/client
+server/server
