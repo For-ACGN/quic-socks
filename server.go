@@ -56,14 +56,25 @@ func (s *Server) handleSession(session quic.Session) {
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(time.Minute))
-	// read password hash
-	hash := make([]byte, sha256.Size)
-	_, err = io.ReadFull(conn, hash)
+	// read password hash with random data
+	tempHash := make([]byte, sha256.Size)
+	_, err = io.ReadFull(conn, tempHash)
 	if err != nil {
 		return
 	}
-	if subtle.ConstantTimeCompare(hash, s.hash) != 1 {
-		return
+	buf := make([]byte, 256)
+	limitedReader := io.LimitReader(conn, 256)
+	hash := sha256.New()
+	hash.Write(s.hash)
+	for {
+		n, err := limitedReader.Read(buf)
+		if err != nil {
+			return
+		}
+		hash.Write(buf[:n])
+		if subtle.ConstantTimeCompare(hash.Sum(nil), tempHash) == 1 {
+			break
+		}
 	}
 	// get connect host
 	host, err := unpackHostData(conn)

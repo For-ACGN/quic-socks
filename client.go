@@ -1,9 +1,11 @@
 package socks
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/tls"
 	"io"
+	"math/rand"
 	"net"
 	"os"
 	"time"
@@ -45,7 +47,18 @@ func (c *Client) Dial() (net.Conn, error) {
 		return nil, err
 	}
 	_ = conn.SetDeadline(time.Now().Add(time.Minute))
-	_, err = conn.Write(c.hash)
+	paddingSize := 128 + rand.Intn(128)
+	padding := make([]byte, paddingSize)
+	for i := 0; i < paddingSize; i++ {
+		padding[i] = byte(rand.Intn(256))
+	}
+	tempHash := sha256.New()
+	tempHash.Write(c.hash)
+	tempHash.Write(padding)
+	buf := bytes.Buffer{}
+	buf.Write(tempHash.Sum(nil))
+	buf.Write(padding)
+	_, err = io.Copy(conn, &buf)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
