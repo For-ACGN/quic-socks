@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -22,13 +23,15 @@ func TestClient_Connect(t *testing.T) {
 	require.NoError(t, err)
 	defer server.Close()
 	go func() { _ = server.ListenAndServe() }()
+	time.Sleep(250 * time.Millisecond)
 
 	clientTLS := tls.Config{RootCAs: x509.NewCertPool()}
 	cert, err := x509.ParseCertificate(tlsCert.Certificate[0])
 	clientTLS.RootCAs.AddCert(cert)
 	client, err := NewClient("localhost:8989", []byte("test"), &clientTLS)
 
-	hc := http.Client{}
+	hc := http.Client{Timeout: 15 * time.Second}
+	defer hc.CloseIdleConnections()
 	hc.Transport = &http.Transport{
 		DialContext: func(_ context.Context, _, addr string) (net.Conn, error) {
 			host, port, _ := net.SplitHostPort(addr)
@@ -36,7 +39,8 @@ func TestClient_Connect(t *testing.T) {
 			conn, err := client.Dial()
 			require.NoError(t, err)
 			return Connect(conn, host, uint16(i))
-		}}
+		},
+	}
 	resp, err := hc.Get("https://github.com/")
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()

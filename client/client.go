@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -27,12 +28,16 @@ func main() {
 		password   string
 		certPath   string
 		preConns   int
+		socksUser  string
+		socksPwd   string
 	)
 	flag.StringVar(&localAddr, "l", "localhost:1080", "local bind address")
 	flag.StringVar(&remoteAddr, "r", "localhost:1523", "server bind address")
 	flag.StringVar(&password, "p", "123456", "password")
 	flag.StringVar(&certPath, "c", "cert.pem", "tls certificate file path")
 	flag.IntVar(&preConns, "pre", 128, "the number of the pre-connected connection")
+	flag.StringVar(&socksUser, "su", "", "the username about local socks server")
+	flag.StringVar(&socksPwd, "sp", "", "the password about local socks server")
 	flag.Parse()
 
 	// set certificate
@@ -114,6 +119,9 @@ func main() {
 		_ = listener.Close()
 	}()
 
+	socksUserBytes := []byte(socksUser)
+	socksPwdBytes := []byte(socksPwd)
+
 	// handle conn
 	var tempDelay time.Duration
 	max := time.Second
@@ -136,7 +144,7 @@ func main() {
 			break
 		}
 		tempDelay = 0
-		go handleConn(connQueue, conn)
+		go handleConn(connQueue, conn, socksUserBytes, socksPwdBytes)
 	}
 	wg.Wait()
 }
@@ -144,8 +152,14 @@ func main() {
 const (
 	version5 uint8 = 0x05
 	reserve  uint8 = 0x00
+	// auth method
+	usernamePassword uint8 = 0x02
+
 	// auth
-	notRequired uint8 = 0x00
+	usernamePasswordVersion uint8 = 0x01
+	statusSucceeded         uint8 = 0x00
+	statusFailed            uint8 = 0x01
+	notRequired             uint8 = 0x00
 	// cmd
 	connect uint8 = 0x01
 	// address
@@ -162,8 +176,76 @@ var (
 	connRefuse = []byte{version5, connRefused, reserve, ipv4, 0, 0, 0, 0, 0, 0}
 )
 
+func authenticate(conn net.Conn, su, sp []byte) bool {
+	var err error
+	if len(su) != 0 && len(sp) != 0 {
+		_, err = conn.Write([]byte{version5, usernamePassword})
+		if err != nil {
+			return false
+		}
+		buf := make([]byte, 16)
+		// read username and password version
+		_, err = io.ReadAtLeast(conn, buf[:1], 1)
+		if err != nil {
+			return false
+		}
+		if buf[0] != usernamePasswordVersion {
+			return false
+		}
+		// read username length
+		_, err = io.ReadAtLeast(conn, buf[:1], 1)
+		if err != nil {
+			return false
+		}
+		l := int(buf[0])
+		if l > len(buf) {
+			buf = make([]byte, l)
+		}
+		// read username
+		_, err = io.ReadAtLeast(conn, buf[:l], l)
+		if err != nil {
+			return false
+		}
+		username := make([]byte, l)
+		copy(username, buf[:l])
+		// read password length
+		_, err = io.ReadAtLeast(conn, buf[:1], 1)
+		if err != nil {
+			return false
+		}
+		l = int(buf[0])
+		if l > len(buf) {
+			buf = make([]byte, l)
+		}
+		// read password
+		_, err = io.ReadAtLeast(conn, buf[:l], l)
+		if err != nil {
+			return false
+		}
+		password := make([]byte, l)
+		copy(password, buf[:l])
+		// write username password version
+		_, err = conn.Write([]byte{usernamePasswordVersion})
+		if err != nil {
+			return false
+		}
+		if subtle.ConstantTimeCompare(su, username) != 1 ||
+			subtle.ConstantTimeCompare(sp, password) != 1 {
+			_, _ = conn.Write([]byte{statusFailed})
+			return false
+		}
+		_, err = conn.Write([]byte{statusSucceeded})
+	} else {
+		_, err = conn.Write([]byte{version5, notRequired})
+	}
+	if err != nil {
+		return false
+	}
+	return true
+}
+
 // simple socks5 server, handle socks5 client
-func handleConn(queue chan net.Conn, conn net.Conn) {
+func handleConn(queue chan net.Conn, conn net.Conn, su, sp []byte) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Println("panic:", r)
@@ -196,10 +278,7 @@ func handleConn(queue chan net.Conn, conn net.Conn) {
 		return
 	}
 
-	// write not require
-	_, err = conn.Write([]byte{version5, notRequired})
-	if err != nil {
-		fmt.Println("write not require failed:", err)
+	if !authenticate(conn, su, sp) {
 		return
 	}
 

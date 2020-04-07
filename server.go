@@ -15,7 +15,7 @@ import (
 
 type Server struct {
 	hash     []byte // password hash
-	listener quic.Listener
+	listener *listener
 }
 
 func NewServer(address string, password []byte, tlsConfig *tls.Config) (*Server, error) {
@@ -25,40 +25,55 @@ func NewServer(address string, password []byte, tlsConfig *tls.Config) (*Server,
 		return nil, err
 	}
 	tlsConfig.NextProtos = append(tlsConfig.NextProtos, nextProto)
-	listener, err := quic.ListenAddr(address, tlsConfig, nil)
+	addr, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return nil, err
+	}
+	quicCfg := quic.Config{
+		HandshakeTimeout: 30 * time.Second,
+		IdleTimeout:      10 * time.Minute,
+		KeepAlive:        true,
+	}
+	quicListener, err := quic.Listen(conn, tlsConfig, &quicCfg)
 	if err != nil {
 		return nil, errors.WithStack(err)
+	}
+	listener := listener{
+		rawConn:  conn,
+		Listener: quicListener,
+		timeout:  30 * time.Second,
 	}
 	hash := sha256.Sum256(password)
 	return &Server{
 		hash:     hash[:],
-		listener: listener,
+		listener: &listener,
 	}, nil
 }
 
 func (s *Server) ListenAndServe() error {
 	for {
-		session, err := s.listener.Accept()
+		conn, err := s.listener.Accept()
 		if err != nil {
 			return err
 		}
-		go s.handleSession(session)
+		go s.handleConn(conn)
 	}
 }
 
-func (s *Server) handleSession(session quic.Session) {
-	defer func() { recover() }()
-	var err error
-	conn, err := newConn(session)
-	if err != nil {
-		_ = session.Close()
-		return
-	}
-	defer func() { _ = conn.Close() }()
+func (s *Server) handleConn(conn net.Conn) {
+	defer func() {
+		recover()
+		_ = conn.Close()
+
+	}()
 	_ = conn.SetDeadline(time.Now().Add(time.Minute))
 	// read password hash with random data
 	tempHash := make([]byte, sha256.Size)
-	_, err = io.ReadFull(conn, tempHash)
+	_, err := io.ReadFull(conn, tempHash)
 	if err != nil {
 		return
 	}
@@ -76,6 +91,12 @@ func (s *Server) handleSession(session quic.Session) {
 			break
 		}
 	}
+	_, err = conn.Write([]byte{authOK})
+	if err != nil {
+		return
+	}
+
+	_ = conn.SetDeadline(time.Time{})
 	// get connect host
 	host, err := unpackHostData(conn)
 	if err != nil {
@@ -91,7 +112,6 @@ func (s *Server) handleSession(session quic.Session) {
 	_, _ = conn.Write([]byte{respOK})
 
 	// copy
-	_ = conn.SetDeadline(time.Time{})
 	go func() {
 		defer func() { recover() }()
 		_, _ = io.Copy(conn, remote)

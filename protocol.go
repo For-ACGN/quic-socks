@@ -9,7 +9,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-const nextProto = "h3-23"
+const nextProto = "h3-27"
 
 // client connect
 // type can be 0x00(IPv4), 0x01(IPv6), 0x02(FQDN)
@@ -37,7 +37,8 @@ const (
 )
 
 const (
-	respOK uint8 = iota + 1
+	authOK uint8 = iota + 1
+	respOK
 	respInvalidPWD
 	respInvalidHost
 	respConnectFailed

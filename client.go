@@ -37,15 +37,57 @@ func NewClient(address string, password []byte, tlsConfig *tls.Config) (*Client,
 }
 
 func (c *Client) Dial() (net.Conn, error) {
-	session, err := quic.DialAddr(c.address, c.tlsConfig, nil)
+	rAddr, err := net.ResolveUDPAddr("udp", c.address)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := newConn(session)
+	udpConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
-		_ = session.Close()
 		return nil, err
 	}
+	var success bool
+	defer func() {
+		if !success {
+			_ = udpConn.Close()
+		}
+	}()
+	quicCfg := quic.Config{
+		HandshakeTimeout: 30 * time.Second,
+		IdleTimeout:      10 * time.Minute,
+		KeepAlive:        true,
+	}
+	session, err := quic.Dial(udpConn, rAddr, c.address, c.tlsConfig, &quicCfg)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if !success {
+			_ = session.CloseWithError(0, "no error")
+		}
+	}()
+	stream, err := session.OpenStreamSync()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if !success {
+			_ = stream.Close()
+		}
+	}()
+	// write data for prevent block
+	_ = stream.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	_, err = stream.Write([]byte{0})
+	if err != nil {
+		return nil, err
+	}
+
+	conn := &Conn{rawConn: udpConn, session: session, stream: stream}
+	defer func() {
+		if !success {
+			_ = conn.Close()
+		}
+	}()
+
 	_ = conn.SetDeadline(time.Now().Add(time.Minute))
 	paddingSize := 128 + rand.Intn(128)
 	padding := make([]byte, paddingSize)
@@ -60,9 +102,17 @@ func (c *Client) Dial() (net.Conn, error) {
 	buf.Write(padding)
 	_, err = io.Copy(conn, &buf)
 	if err != nil {
-		_ = conn.Close()
 		return nil, err
 	}
+	authResp := make([]byte, 1)
+	_, err = io.ReadFull(conn, authResp)
+	if err != nil {
+		return nil, err
+	}
+	if authResp[0] != authOK {
+		return nil, Response(authResp[0])
+	}
+	success = true
 	return conn, nil
 }
 
